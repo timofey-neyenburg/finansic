@@ -1,7 +1,7 @@
 tiny cli for finance management
 
 Запуск:
-  python finance.py
+  python finansic.py
 
 Данные хранятся в файле finance.json в текущей рабочей директории
 

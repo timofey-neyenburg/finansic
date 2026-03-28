@@ -1,30 +1,11 @@
 import json
 import sys
 
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from datetime import datetime, date, timedelta
-from os import get_terminal_size
-from dataclasses import dataclass
-
-
-LOGO = """
-  ▄▄                                       
- ██  ▀▀                          ▀▀        
-▀██▀ ██  ████▄  ▀▀█▄ ████▄ ▄█▀▀▀ ██  ▄████ 
- ██  ██  ██ ██ ▄█▀██ ██ ██ ▀███▄ ██  ██    
- ██  ██▄ ██ ██ ▀█▄██ ██ ██ ▄▄▄█▀ ██▄ ▀████ 
-                                           
-"""
-
-
-_ANSI_RESET = "\033[0m"
-_ANSI_FG_BLACK = "\033[30m"
-_ANSI_BG_GREEN = "\033[42m"
-_ANSI_BG_YELLOW = "\033[43m"
-_ANSI_BG_RED = "\033[41m"
-_ANSI_BG_BLUE = "\033[44m"
-
+from datetime import date, datetime, timedelta
+from typing import Optional
 
 
 class FinanceRecordType(Enum):
@@ -38,6 +19,44 @@ class FinanceRecordType(Enum):
             return FinanceRecordType.EXPENSE
         else:
             raise ValueError(f"Invalid option: {option}")
+
+
+@dataclass
+class Deposit:
+    name: str
+    description: str
+    available_amount: float = 0
+    planning_amount: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "available_amount": self.available_amount,
+            "planning_amount": self.planning_amount,
+        }
+    
+    @staticmethod
+    def from_dict(data: dict) -> "Deposit":
+        return Deposit(
+            name=data["name"],
+            description=data["description"],
+            available_amount=data["available_amount"],
+            planning_amount=data.get("planning_amount")
+        )
+
+
+# TODO: implement
+@dataclass
+class Obligation:
+    name: str
+    description: str
+    amount: float
+    payout_date: date
+    percent: Optional[float] = None # 0-100%
+    percent_period: Optional[str] = None # day, week, month, year
+    is_paid: bool = False
+
 
 @dataclass
 class FinanceRecord:
@@ -64,23 +83,48 @@ class FinanceRecord:
         }
 
 
+def _balance_from_records(records: list[FinanceRecord]) -> float:
+    inc = sum(r.amount for r in records if r.type == FinanceRecordType.INCOME)
+    exp = sum(r.amount for r in records if r.type == FinanceRecordType.EXPENSE)
+    return inc - exp
+
+
+def _parse_record_date(r: FinanceRecord) -> date:
+    return datetime.strptime(r.date.strip(), "%d.%m.%Y").date()
+
+
+def _last_calendar_month_bounds(today: date | None = None) -> tuple[date, date]:
+    t = today or date.today()
+    first_this = t.replace(day=1)
+    last_prev = first_this - timedelta(days=1)
+    first_prev = last_prev.replace(day=1)
+    return first_prev, last_prev
+
+
+def _month_key(d: date) -> tuple[int, int]:
+    return (d.year, d.month)
+
+
 @dataclass
 class AccountTable:
     balance: float
     records: list[FinanceRecord]
+    deposits: list[Deposit]
 
     def to_dict(self) -> dict:
         return {
             "balance": self.balance,
+            "deposits": [d.to_dict() for d in self.deposits],
             "records": [r.to_dict() for r in self.records],
         }
     
     @staticmethod
     def from_dict(data: dict) -> "AccountTable":
-        return AccountTable(
-            balance=float(data["balance"]),
-            records=[FinanceRecord.from_dict(r) for r in data["records"]],
-        )
+        records = [FinanceRecord.from_dict(r) for r in data.get("records", [])]
+        deposits = [Deposit.from_dict(d) for d in data.get("deposits", [])]
+        rec_net = _balance_from_records(records)
+        balance = float(data["balance"]) if "balance" in data else rec_net
+        return AccountTable(balance=balance, records=records, deposits=deposits)
 
 
 class FinanceStore:
@@ -90,24 +134,28 @@ class FinanceStore:
 
     def _load_account(self) -> AccountTable:
         if not self._datapath.exists():
-            empty = AccountTable(balance=0.0, records=[])
+            self._baseline = 0.0
+            empty = AccountTable(balance=0.0, records=[], deposits=[])
             self._json_dump(empty.to_dict())
             return empty
 
         with open(self._datapath, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        records = [FinanceRecord.from_dict(r) for r in raw.get("records", [])]
-
-        if "balance" in raw:
-            balance = float(raw["balance"])
-        else:
-            balance = _balance_from_records(records)
-
-        return AccountTable(balance=balance, records=records)
+        acc = AccountTable.from_dict(raw)
+        self._baseline = acc.balance - _balance_from_records(acc.records)
+        return acc
 
     def save_account(self):
-        self._account.balance = _balance_from_records(self._account.records)
+        rec_net = _balance_from_records(self._account.records)
+        self._account.balance = self._baseline + rec_net
         self._json_dump(self._account.to_dict())
+        self._account = self._load_account()
+
+    def set_balance(self, new_total: float) -> None:
+        """Задать итоговый баланс; записи не трогаем, подстраивается начальный остаток."""
+        rec_net = _balance_from_records(self._account.records)
+        self._baseline = new_total - rec_net
+        self.save_account()
 
     def add_record(self, record: FinanceRecord):
         self._account.records.append(record)
@@ -132,59 +180,30 @@ class FinanceStore:
 
     @property
     def account(self) -> AccountTable:
-        return self._account
+        account = self._load_account()
+        return account
 
     @property
     def records(self) -> list[FinanceRecord]:
-        return self._account.records
+        account = self._load_account()
+        return account.records
 
+    @property
+    def deposits(self) -> list[Deposit]:
+        account = self._load_account()
+        return account.deposits
 
-def delim(symbol: str):
-    width = get_terminal_size().columns
-    print(symbol * width)
+    def add_deposit(self, deposit: Deposit) -> None:
+        self._account.deposits.append(deposit)
+        self.save_account()
 
+    def update_deposit(self, index: int, deposit: Deposit) -> None:
+        self._account.deposits[index] = deposit
+        self.save_account()
 
-def _balance_from_records(records: list[FinanceRecord]) -> float:
-    inc = sum(r.amount for r in records if r.type == FinanceRecordType.INCOME)
-    exp = sum(r.amount for r in records if r.type == FinanceRecordType.EXPENSE)
-    return inc - exp
-
-
-def _parse_record_date(r: FinanceRecord) -> date:
-    return datetime.strptime(r.date.strip(), "%d.%m.%Y").date()
-
-
-def _last_calendar_month_bounds(today: date | None = None) -> tuple[date, date]:
-    t = today or date.today()
-    first_this = t.replace(day=1)
-    last_prev = first_this - timedelta(days=1)
-    first_prev = last_prev.replace(day=1)
-    return first_prev, last_prev
-
-
-def _month_key(d: date) -> tuple[int, int]:
-    return (d.year, d.month)
-
-
-def _format_money(x: float) -> str:
-    return f"{x:.2f}"
-
-
-def _style_income_amount(s: str) -> str:
-    return f"{_ANSI_FG_BLACK}{_ANSI_BG_GREEN}{s}{_ANSI_RESET}"
-
-
-def _style_expense_amount(s: str) -> str:
-    return f"{_ANSI_FG_BLACK}{_ANSI_BG_YELLOW}{s}{_ANSI_RESET}"
-
-
-def _style_balance_amount(balance: float) -> str:
-    s = _format_money(balance)
-    if balance < 0:
-        return f"{_ANSI_FG_BLACK}{_ANSI_BG_RED}{s}{_ANSI_RESET}"
-    if balance > 0:
-        return f"{_ANSI_FG_BLACK}{_ANSI_BG_BLUE}{s}{_ANSI_RESET}"
-    return s
+    def delete_deposit(self, index: int) -> None:
+        del self._account.deposits[index]
+        self.save_account()
 
 
 class AnalyticsBuilder:
@@ -217,7 +236,11 @@ class AnalyticsBuilder:
         return sum(r.amount for r in rs if r.type == FinanceRecordType.EXPENSE)
 
     def total_balance(self, records: list[FinanceRecord] | None = None) -> float:
-        return self.total_income(records) - self.total_expense(records)
+        rs = records if records is not None else self._records
+        net = self.total_income(rs) - self.total_expense(rs)
+        if records is None:
+            return self._account.balance
+        return net
 
     def all_categories(self, records: list[FinanceRecord] | None = None) -> list[str]:
         rs = records if records is not None else self._records
@@ -232,8 +255,8 @@ class AnalyticsBuilder:
             by_cat[r.category] = by_cat.get(r.category, 0.0) + r.amount
         return sorted(by_cat.items(), key=lambda x: (-x[1], x[0]))
 
-    def all_expenses_by_categories_sorted(self) -> dict[str, float]:
-        return dict(self.expenses_by_category_sorted())
+    def all_expenses_by_categories_sorted(self, records: list[FinanceRecord] | None = None) -> dict[str, float]:
+        return dict(self.expenses_by_category_sorted(records))
 
     def records_by_month(self) -> dict[tuple[int, int], list[FinanceRecord]]:
         buckets: dict[tuple[int, int], list[FinanceRecord]] = {}
@@ -246,344 +269,79 @@ class AnalyticsBuilder:
         return sorted(self.records_by_month().keys())
 
 
-class BaseCommand:
-    def __init__(
-        self,
-        slug: str,
-        description: str,
-    ):
-        self.slug = slug
-        self.description = description
-        self.store = FinanceStore()
+class Finansic:
+    def __init__(self) -> None:
+        self._store = FinanceStore()
     
-    def execute(self):
-        raise NotImplementedError
+    @property
+    def account(self) -> AccountTable:
+        return self._store.account
 
-
-class ExitCommand(BaseCommand):
-    def __init__(self):
-        super().__init__(slug="exit", description="Выйти из программы")
+    def add_record(self, record: FinanceRecord) -> None:
+        self._store.add_record(record)
     
-    def execute(self):
-        print("Выход из программы.")
-        sys.exit(0)
-
-
-class AddRecordCommand(BaseCommand):
-    def __init__(self):
-        super().__init__(slug="add", description="Добавить запись")
+    def update_record(self, index: int, record: FinanceRecord) -> None:
+        self._store.update_record(index, record)
     
-    def execute(self):
-        date = input("Введите дату (dd.mm.yyyy) [сегодняшняя]: ")
-        if not date:
-            date = datetime.now().strftime("%d.%m.%Y")
+    def view_all_records(self) -> list[FinanceRecord]:
+        return self._store.records
+    
+    def view_income_records(self) -> list[FinanceRecord]:
+        return [r for r in self._store.records if r.type == FinanceRecordType.INCOME]
+    
+    def view_expense_records(self) -> list[FinanceRecord]:
+        return [r for r in self._store.records if r.type == FinanceRecordType.EXPENSE]
+    
+    def delete_record(self, index: int) -> None:
+        self._store.delete_record(index)
+    
+    def set_balance(self, new_total: float) -> None:
+        self._store.set_balance(new_total)
 
-        category = input("Введите категорию: ")
-        amount = float(input("Введите сумму: "))
-        type = input("Введите тип (income(i)/expense(e)): ")
-        
-        record = FinanceRecord(
-            date=date,
-            category=category,
-            amount=amount,
-            type=FinanceRecordType.from_cli_option(type)
-        )
-        self.store.add_record(record)
+    def view_all_deposits(self) -> list[Deposit]:
+        return self._store.deposits
 
-        print("Запись добавлена")
-        delim("-")
+    def add_deposit(self, deposit: Deposit) -> None:
+        self._store.add_deposit(deposit)
 
+    def update_deposit(self, index: int, deposit: Deposit) -> None:
+        self._store.update_deposit(index, deposit)
 
-def _format_record_line(i: int, r: FinanceRecord) -> str:
-    t = "доход" if r.type == FinanceRecordType.INCOME else "расход"
-    amt = _format_money(r.amount)
-    if r.type == FinanceRecordType.INCOME:
-        amt = _style_income_amount(amt)
-    else:
-        amt = _style_expense_amount(amt)
-    return f"  [{i}] {r.date} | {r.category} | {amt} | {t}"
-
-
-class ViewRecordsCommand(BaseCommand):
-    def __init__(self):
-        super().__init__(slug="view", description="Посмотреть записи")
-
-    def execute(self):
-        recs = self.store.records
-        if not recs:
-            print("Записей пока нет.")
-        else:
-            print('Какие записи просмотреть? [все(a)/income(i)/expense(e)]')
-            choice = input("Выберите вариант: ")
-            if choice == "a":
-                recs = recs
-            else:
-                recs = [r for r in recs if r.type == FinanceRecordType.from_cli_option(choice)]
-
-            print("Записи:")
-            for i, r in enumerate(recs):
-                print(_format_record_line(i, r))
-        delim("-")
-
-
-class EditRecordCommand(BaseCommand):
-    def __init__(self):
-        super().__init__(slug="edit", description="Редактировать запись")
-
-    def execute(self):
-        recs = self.store.records
-        if not recs:
-            print("Нет записей для редактирования.")
-            delim("-")
-            return
-
-        print("Записи:")
-        for i, r in enumerate(recs):
-            print(_format_record_line(i, r))
-
-        idx = int(input("Номер записи для редактирования: "))
-        date = input("Дата (dd.mm.yyyy) [Enter — без изменений]: ")
-        category = input("Категория [Enter — без изменений]: ")
-        amount_raw = input("Сумма [Enter — без изменений]: ")
-        rtype_raw = input("Тип income(i)/expense(e) [Enter — без изменений]: ")
-
-        old = recs[idx]
-        date_value = date.strip() or old.date
-        category_value = category.strip() or old.category
-        amount_value = float(amount_raw) if amount_raw.strip() else old.amount
-        type_value = FinanceRecordType.from_cli_option(rtype_raw.strip()) if rtype_raw.strip() else old.type
-
-        new = FinanceRecord(
-            date=date_value,
-            category=category_value,
-            amount=amount_value,
-            type=type_value,
-        )
-
-        self.store.update_record(idx, new)
-
-        print("Запись обновлена.")
-        delim("-")
-
-
-class DeleteRecordCommand(BaseCommand):
-    def __init__(self):
-        super().__init__(slug="delete", description="Удалить запись")
-
-    def execute(self):
-        recs = self.store.records
-        if not recs:
-            print("Нет записей для удаления.")
-            delim("-")
-            return
-
-        print("Записи:")
-        for i, r in enumerate(recs):
-            print(_format_record_line(i, r))
-
-        idx = int(input("Номер записи для удаления: "))
-        confirm = input('Введите "да" для подтверждения: ').strip().lower()
-        if confirm != "да":
-            print("Удаление отменено.")
-            delim("-")
-            return
-
-        self.store.delete_record(idx)
-
-        print("Запись удалена.")
-        delim("-")
-
-
-class AnalyticsCommand(BaseCommand):
-    def __init__(self):
-        super().__init__(slug="analytics", description="Посмотреть аналитику")
-
-    def execute(self):
-        account = self.store.account
-        records = account.records
-        b = AnalyticsBuilder(account)
-
-        if not records:
-            print("Записей нет — аналитика пуста.")
-            delim("-")
-            return
-
-        print("Аналитика. Выберите раздел:")
-        print("[0] Доходы и расходы за всё время")
-        print("[1] Доходы и расходы за прошлый месяц")
-        print("[2] Доходы и расходы за выбранный период")
-        print("[3] Список категорий")
-        print("[4] Траты по категориям — за всё время")
-        print("[5] Траты по категориям — за прошлый месяц")
-        print("[6] Траты по категориям — за выбранный период")
-        print("[7] Полный отчёт по месяцам")
-
-        choice = input("Номер раздела: ").strip()
-
-        if choice == "0":
-            self._print_income_expense(
-                "За всё время:",
-                b.total_income(),
-                b.total_expense(),
-            )
-        elif choice == "1":
-            lo, hi = _last_calendar_month_bounds()
-            rs = b.filtered(lo, hi)
-            self._print_income_expense(
-                f"За прошлый календарный месяц ({lo.strftime('%d.%m.%Y')} — {hi.strftime('%d.%m.%Y')}):",
-                b.total_income(rs),
-                b.total_expense(rs),
-            )
-        elif choice == "2":
-            period = self._ask_date_period()
-            if period is None:
-                delim("-")
-                return
-            lo, hi = period
-            rs = b.filtered(lo, hi)
-            self._print_income_expense(
-                f"За период {lo.strftime('%d.%m.%Y')} — {hi.strftime('%d.%m.%Y')}:",
-                b.total_income(rs),
-                b.total_expense(rs),
-            )
-        elif choice == "3":
-            cats = b.all_categories()
-            print("Категории (все записи):")
-            if not cats:
-                print("  (нет)")
-            else:
-                for c in cats:
-                    print(f"  — {c}")
-        elif choice == "4":
-            self._print_expenses_by_category(
-                b.expenses_by_category_sorted(),
-                "Траты по категориям (за всё время), по убыванию суммы:",
-            )
-        elif choice == "5":
-            lo, hi = _last_calendar_month_bounds()
-            rs = b.filtered(lo, hi)
-            self._print_expenses_by_category(
-                b.expenses_by_category_sorted(rs),
-                f"Траты по категориям за прошлый месяц ({lo.strftime('%d.%m.%Y')} — {hi.strftime('%d.%m.%Y')}), по убыванию суммы:",
-            )
-        elif choice == "6":
-            period = self._ask_date_period()
-            if period is None:
-                delim("-")
-                return
-            lo, hi = period
-            rs = b.filtered(lo, hi)
-            self._print_expenses_by_category(
-                b.expenses_by_category_sorted(rs),
-                f"Траты по категориям за период {lo.strftime('%d.%m.%Y')} — {hi.strftime('%d.%m.%Y')}, по убыванию суммы:",
-            )
-        elif choice == "7":
-            by_m = b.records_by_month()
-            print("Полный отчёт по месяцам (без произвольного периода):")
-            for ym in sorted(by_m.keys()):
-                y, month = ym
-                rs = by_m[ym]
-                label = f"{y:04d}-{month:02d}"
-                delim(".")
-                print(f"Месяц {label}")
-                self._print_income_expense(
-                    "  Сводка:",
-                    b.total_income(rs),
-                    b.total_expense(rs),
-                )
-                cats = b.all_categories(rs)
-                print("  Категории за месяц:")
-                if not cats:
-                    print("    (нет)")
-                else:
-                    for c in cats:
-                        print(f"    — {c}")
-                self._print_expenses_by_category(
-                    b.expenses_by_category_sorted(rs),
-                    "  Траты по категориям (по убыванию суммы):",
-                )
-            delim(".")
-        else:
-            print("Неизвестный пункт меню.")
-
-        delim("-")
-
-    def _ask_date_period(self) -> tuple[date, date] | None:
-        start_raw = input("Дата начала периода (dd.mm.yyyy): ").strip()
-        end_raw = input("Дата конца периода (dd.mm.yyyy): ").strip()
-        try:
-            start_d = datetime.strptime(start_raw, "%d.%m.%Y").date()
-            end_d = datetime.strptime(end_raw, "%d.%m.%Y").date()
-        except ValueError:
-            print("Неверный формат даты. Ожидается dd.mm.yyyy.")
-            return None
-        if start_d > end_d:
-            print("Дата начала не может быть позже даты конца.")
-            return None
-        return start_d, end_d
-
-
-    def _print_income_expense(self, title: str, income: float, expense: float) -> None:
-        print(title)
-        print(f"  Доходы: {_style_income_amount(_format_money(income))}")
-        print(f"  Расходы: {_style_expense_amount(_format_money(expense))}")
-        print(f"  Баланс: {_style_balance_amount(income - expense)}")
-
-
-    def _print_expenses_by_category(self, pairs: list[tuple[str, float]], title: str) -> None:
-        print(title)
-        if not pairs:
-            print("  (нет расходов за период)")
-            return
-        for cat, amt in pairs:
-            print(f"  {cat}: {_style_expense_amount(_format_money(amt))}")
-
-COMMANDS = [
-    AddRecordCommand(),
-    ViewRecordsCommand(),
-    EditRecordCommand(),
-    DeleteRecordCommand(),
-    AnalyticsCommand(),
-    ExitCommand(),
-]
-
-COMMAND_MAP = {c.slug: c for c in COMMANDS}
-
-
-def print_commands():
-    delim(".")
-    for ind, command in enumerate(COMMANDS):
-        print(f"[{ind}] {command.slug}: {command.description}")
-    print(f"[{len(COMMANDS)}] help: Показать список команд")
-    delim(".")
-
-
-def main():
-    print(LOGO)
-    print_commands()
-
-    while True:
-        choice = input("Выберите команду: ")
-
-        if choice.isdigit():
-            choice = int(choice)
-            if choice == len(COMMANDS):
-                print_commands()
-                continue
-            command = COMMANDS[choice]
-        else:
-            choice = choice.strip().lower()
-            if choice == "help":
-                print_commands()
-                continue
-            if choice not in COMMAND_MAP:
-                print(f"Команда {choice} не найдена.")
-                delim("-")
-                continue
-            command = COMMAND_MAP[choice]
-
-        command.execute()
-
-
-if __name__ == "__main__":
-    main()
+    def delete_deposit(self, index: int) -> None:
+        self._store.delete_deposit(index)
+    
+    def get_total_income_and_expense(self) -> tuple[float, float]:
+        builder = AnalyticsBuilder(self._store.account)
+        return builder.total_income(), builder.total_expense()
+    
+    def get_previous_month_income_and_expense(self) -> tuple[float, float]:
+        builder = AnalyticsBuilder(self._store.account)
+        lo, hi = _last_calendar_month_bounds()
+        rs = builder.filtered(lo, hi)
+        return builder.total_income(rs), builder.total_expense(rs)
+    
+    def get_period_income_and_expense(self, period: tuple[date, date]) -> tuple[float, float]:
+        builder = AnalyticsBuilder(self._store.account)
+        rs = builder.filtered(period[0], period[1])
+        return builder.total_income(rs), builder.total_expense(rs)
+    
+    def get_all_categories(self) -> list[str]:
+        builder = AnalyticsBuilder(self._store.account)
+        return builder.all_categories()
+    
+    def get_total_expenses_by_categories(self) -> dict[str, float]:
+        builder = AnalyticsBuilder(self._store.account)
+        return builder.all_expenses_by_categories_sorted()
+    
+    def get_total_expenses_by_categories_previous_month(self) -> dict[str, float]:
+        builder = AnalyticsBuilder(self._store.account)
+        lo, hi = _last_calendar_month_bounds()
+        rs = builder.filtered(lo, hi)
+        return builder.all_expenses_by_categories_sorted(rs)
+    
+    def get_total_expenses_by_categories_period(self, period: tuple[date, date]) -> dict[str, float]:
+        builder = AnalyticsBuilder(self._store.account)
+        lo, hi = period
+        rs = builder.filtered(lo, hi)
+        return builder.all_expenses_by_categories_sorted(rs)
+    

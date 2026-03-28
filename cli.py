@@ -640,10 +640,9 @@ COMMAND_MAP = {c.slug: c for c in COMMANDS}
 
 def print_commands():
     delim(".")
-    # for ind, command in enumerate(COMMANDS):
-    #     print(f"[{ind}] {command.slug}: {command.description}")
-    # print(f"[{len(COMMANDS)}] help: Показать список команд")
-    TUITableView.from_list("Команды", [f"[{ind}] {command.slug}: {command.description}" for ind, command in enumerate(COMMANDS)], row_max_itmes=2).print()
+    for ind, command in enumerate(COMMANDS):
+        print(f"[{ind}] {command.slug}: {command.description}")
+    print(f"[{len(COMMANDS)}] help: Показать список команд")
     delim(".")
 
 

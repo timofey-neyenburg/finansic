@@ -1,4 +1,5 @@
 import json
+import sys
 
 from enum import Enum
 from pathlib import Path
@@ -25,6 +26,14 @@ def delim(symbol: str):
 class FinanceRecordType(Enum):
     INCOME = "income"
     EXPENSE = "expense"
+
+    def from_cli_option(option: str) -> "FinanceRecordType":
+        if option in ["i", "income"]:
+            return FinanceRecordType.INCOME
+        elif option in ["e", "expense"]:
+            return FinanceRecordType.EXPENSE
+        else:
+            raise ValueError(f"Invalid option: {option}")
 
 
 @dataclass
@@ -106,6 +115,15 @@ class BaseCommand:
         raise NotImplementedError
 
 
+class ExitCommand(BaseCommand):
+    def __init__(self):
+        super().__init__(slug="exit", description="Выйти из программы")
+    
+    def execute(self):
+        print("Выход из программы.")
+        sys.exit(0)
+
+
 class AddRecordCommand(BaseCommand):
     def __init__(self):
         super().__init__(slug="add", description="Добавить запись")
@@ -117,13 +135,13 @@ class AddRecordCommand(BaseCommand):
 
         category = input("Введите категорию: ")
         amount = float(input("Введите сумму: "))
-        type = input("Введите тип (income/expense): ")
-
+        type = input("Введите тип (income(i)/expense(e)): ")
+        
         record = FinanceRecord(
             date=date,
             category=category,
             amount=amount,
-            type=FinanceRecordType(type)
+            type=FinanceRecordType.from_cli_option(type)
         )
         self.store.add_record(record)
 
@@ -145,6 +163,13 @@ class ViewRecordsCommand(BaseCommand):
         if not recs:
             print("Записей пока нет.")
         else:
+            print('Какие записи просмотреть? [все(a)/income(i)/expense(e)]')
+            choice = input("Выберите вариант: ")
+            if choice == "a":
+                recs = recs
+            else:
+                recs = [r for r in recs if r.type == FinanceRecordType.from_cli_option(choice)]
+
             print("Записи:")
             for i, r in enumerate(recs):
                 print(_format_record_line(i, r))
@@ -170,14 +195,19 @@ class EditRecordCommand(BaseCommand):
         date = input("Дата (dd.mm.yyyy) [Enter — без изменений]: ")
         category = input("Категория [Enter — без изменений]: ")
         amount_raw = input("Сумма [Enter — без изменений]: ")
-        rtype_raw = input("Тип income/expense [Enter — без изменений]: ")
+        rtype_raw = input("Тип income(i)/expense(e) [Enter — без изменений]: ")
 
         old = recs[idx]
+        date_value = date.strip() or old.date
+        category_value = category.strip() or old.category
+        amount_value = float(amount_raw) if amount_raw.strip() else old.amount
+        type_value = FinanceRecordType.from_cli_option(rtype_raw.strip()) if rtype_raw.strip() else old.type
+
         new = FinanceRecord(
-            date=date.strip() or old.date,
-            category=category.strip() or old.category,
-            amount=float(amount_raw) if amount_raw.strip() else old.amount,
-            type=FinanceRecordType(rtype_raw.strip()) if rtype_raw.strip() else old.type,
+            date=date_value,
+            category=category_value,
+            amount=amount_value,
+            type=type_value,
         )
 
         self.store.update_record(idx, new)
@@ -230,6 +260,7 @@ COMMANDS = [
     EditRecordCommand(),
     DeleteRecordCommand(),
     AnalyticsCommand(),
+    ExitCommand(),
 ]
 
 

@@ -116,6 +116,42 @@ def _print_deposits_table(deps: list[Deposit]) -> None:
         print(row)
 
 
+
+class TUIColumn:
+    def __init__(self, text: str, width: int = 0):
+        self.text = text
+        self.width = width
+    
+    def __str__(self):
+        return self.text.ljust(self.width)
+
+
+class TUIRow:
+    def __init__(self, columns: list[TUIColumn]):
+        self.columns = columns
+    
+    def __str__(self):
+        return " | ".join([str(c) for c in self.columns])
+
+class TUITableView:
+    def __init__(self, header: str, rows: list[TUIRow]):
+        self.header = header
+        self.rows = rows
+    
+    def print(self):
+        print(self.header)
+        for row in self.rows:
+            print(row)
+    
+    @staticmethod
+    def from_list(header: str, items: list[str], row_max_itmes: int = 2) -> 'TUITableView':
+        max_length_item = max(len(item) for item in items)
+        rows = []
+        for i in range(len(items) // row_max_itmes):
+            rows.append(TUIRow(columns=[TUIColumn(text=items[i*row_max_itmes + j], width=max_length_item) for j in range(row_max_itmes)]))
+        return TUITableView(header, rows)
+
+
 class BaseCommand:
     def __init__(
         self,
@@ -604,9 +640,10 @@ COMMAND_MAP = {c.slug: c for c in COMMANDS}
 
 def print_commands():
     delim(".")
-    for ind, command in enumerate(COMMANDS):
-        print(f"[{ind}] {command.slug}: {command.description}")
-    print(f"[{len(COMMANDS)}] help: Показать список команд")
+    # for ind, command in enumerate(COMMANDS):
+    #     print(f"[{ind}] {command.slug}: {command.description}")
+    # print(f"[{len(COMMANDS)}] help: Показать список команд")
+    TUITableView.from_list("Команды", [f"[{ind}] {command.slug}: {command.description}" for ind, command in enumerate(COMMANDS)], row_max_itmes=2).print()
     delim(".")
 
 
